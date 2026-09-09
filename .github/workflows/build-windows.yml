@@ -1,0 +1,55 @@
+name: Build Windows MSI
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Download & Extract Windows VLC 3.0 (64-bit)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "package-resources\vlc"
+          $vlcZip = "vlc-3.0.21-win64.zip"
+          $vlcUrl = "https://download.videolan.org/pub/videolan/vlc/3.0.21/win64/$vlcZip"
+          
+          Write-Host "Downloading VLC binaries..."
+          Invoke-WebRequest -Uri $vlcUrl -OutFile $vlcZip
+          
+          Write-Host "Extracting VLC..."
+          Expand-Archive -Path $vlcZip -DestinationPath "vlc-temp"
+          
+          # Copy core DLLs and plugins directory into package-resources/vlc
+          $extractedRoot = Get-ChildItem -Path "vlc-temp" -Directory | Select-Object -First 1
+          Copy-Item "$($extractedRoot.FullName)\libvlc.dll" -Destination "package-resources\vlc\"
+          Copy-Item "$($extractedRoot.FullName)\libvlccore.dll" -Destination "package-resources\vlc\"
+          Copy-Item -Recurse "$($extractedRoot.FullName)\plugins" -Destination "package-resources\vlc\"
+          
+          Remove-Item -Recurse -Force "vlc-temp"
+          Remove-Item -Force $vlcZip
+
+      - name: Build Windows MSI Package
+        run: .\gradlew.bat packageMsi
+
+      - name: Upload Windows MSI Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenFlix-Desktop-Windows-MSI
+          path: build/compose/binaries/main/msi/*.msi
