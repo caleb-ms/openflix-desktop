@@ -1,4 +1,4 @@
-package com.calebms.openflix.desktop // (or com.calebms.openflix.desktop for PC)
+package com.calebms.openflix.desktop
 
 import kotlinx.serialization.Serializable
 

@@ -78,7 +78,7 @@ class DesktopRemoteClient {
                 )
                 s.send(Frame.Text(Json.encodeToString(tick)))
             } catch (e: Exception) {
-                // Ignore transient frame errors
+
             }
         }
     }

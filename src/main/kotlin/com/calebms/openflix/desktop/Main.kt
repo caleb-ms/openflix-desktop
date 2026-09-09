@@ -34,7 +34,6 @@ import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
 import java.io.File
 
 fun initializeVlc() {
-    // Determine the application root directory when packaged
     val appDir = System.getProperty("compose.application.resources.dir")?.let { File(it) }
         ?: File(System.getProperty("user.dir"))
 
@@ -45,7 +44,7 @@ fun initializeVlc() {
         NativeLibrary.addSearchPath(RuntimeUtil.getLibVlcCoreLibraryName(), bundledVlcDir.absolutePath)
         NativeLibrary.addSearchPath(RuntimeUtil.getLibVlcLibraryName(), bundledVlcDir.absolutePath)
 
-        // Point VLC to its codec plugins folder
+
         val pluginsDir = File(bundledVlcDir, "plugins")
         if (pluginsDir.exists()) {
             System.setProperty("VLC_PLUGIN_PATH", pluginsDir.absolutePath)
@@ -264,7 +263,6 @@ fun main() {
             title = "OpenFlix Player - $currentTitle"
         ) {
             Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-                // Top Bar: Title, Connection status, and Overview when paused
                 AnimatedVisibility(
                     visible = isControlsVisible,
                     enter = expandVertically() + fadeIn(),
@@ -302,7 +300,6 @@ fun main() {
                                 }
                             }
 
-                            // Show synopsis when paused
                             if (!isPlaying && !currentOverview.isNullOrBlank()) {
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Text(
@@ -317,7 +314,7 @@ fun main() {
                     }
                 }
 
-                // Video Surface
+
                 Box(modifier = Modifier.fillMaxWidth().weight(1f).background(Color.Black)) {
                     SwingPanel(
                         modifier = Modifier.fillMaxSize(),
@@ -366,7 +363,7 @@ fun main() {
                     )
                 }
 
-                // Bottom Control Bar
+
                 val isNearEnd = totalDurationMs > 30000L && currentPositionMs >= (totalDurationMs * 0.95)
                 val shouldShowBottomBar = isControlsVisible || (isNearEnd && hasNextEpisode && !dismissedCredits)
 
