@@ -53,7 +53,9 @@ compose.desktop {
             targetFormats(
                 org.jetbrains.compose.desktop.application.dsl.TargetFormat.Rpm,
                 org.jetbrains.compose.desktop.application.dsl.TargetFormat.AppImage,
-                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Deb
+                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Deb,
+                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi,
+                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Exe,
             )
             packageName = "OpenFlixDesktop"
             packageVersion = "1.0.0"
@@ -66,6 +68,11 @@ compose.desktop {
                 rpmLicenseType = "GPL-3.0"
                 appCategory = "AudioVideo"
                 menuGroup = "AudioVideo"
+            }
+
+            windows {
+                menuGroup = "OpenFlix"
+                upgradeUuid = "6d8f8d9b-3e5f-4a87-b9c2-9e2c4d123456"
             }
         }
     }
