@@ -1,0 +1,8 @@
+.gradle/
+build/
+package-resources/vlc/
+appimagetool*
+*.AppImage
+*.rpm
+.idea/
+*.iml
