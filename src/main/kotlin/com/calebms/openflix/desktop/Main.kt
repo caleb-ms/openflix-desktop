@@ -1,6 +1,7 @@
 package com.calebms.openflix.desktop
 
-import androidx.compose.animation.*
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -12,10 +13,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.SwingPanel
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -32,6 +36,7 @@ import com.sun.jna.NativeLibrary
 import uk.co.caprica.vlcj.binding.support.runtime.RuntimeUtil
 import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
 import java.io.File
+import kotlin.system.exitProcess
 
 fun initializeVlc() {
     val appDir = System.getProperty("compose.application.resources.dir")?.let { File(it) }
@@ -43,7 +48,6 @@ fun initializeVlc() {
         println("Loading bundled VLC from: ${bundledVlcDir.absolutePath}")
         NativeLibrary.addSearchPath(RuntimeUtil.getLibVlcCoreLibraryName(), bundledVlcDir.absolutePath)
         NativeLibrary.addSearchPath(RuntimeUtil.getLibVlcLibraryName(), bundledVlcDir.absolutePath)
-
 
         val pluginsDir = File(bundledVlcDir, "plugins")
         if (pluginsDir.exists()) {
@@ -64,6 +68,7 @@ fun main() {
 
         val windowState = rememberWindowState(placement = WindowPlacement.Floating)
         val coroutineScope = rememberCoroutineScope()
+        val isShuttingDown = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
 
         var currentTitle by remember { mutableStateOf("OpenFlix Idle") }
         var currentOverview by remember { mutableStateOf<String?>(null) }
@@ -82,10 +87,12 @@ fun main() {
         var isSeeking by remember { mutableStateOf(false) }
         var scrubPosition by remember { mutableLongStateOf(0L) }
 
+        val isWindows = remember { System.getProperty("os.name").lowercase().contains("win") }
         val mediaPlayerComponent = remember {
+            val voutParam = if (isWindows) "--vout=direct3d11,any" else "--vout=x11,any"
             EmbeddedMediaPlayerComponent(
                 "--no-video-title-show",
-                "--vout=x11,any",
+                voutParam,
                 "--codec=avcodec,all",
                 "--network-caching=1500",
                 "--clock-jitter=0",
@@ -148,6 +155,31 @@ fun main() {
                 WindowPlacement.Floating
             } else {
                 WindowPlacement.Fullscreen
+            }
+        }
+
+        fun safeShutdown() {
+            if (!isShuttingDown.compareAndSet(false, true)) return
+
+            // Run teardown off the UI thread
+            kotlin.concurrent.thread(start = true, isDaemon = false, name = "AppShutdownThread") {
+                try {
+                    client.sendProgressTick(activeMediaId, activeEpisodeId, currentPositionMs, totalDurationMs, false)
+                    client.disconnect()
+                    client.close()
+                    discovery.stop()
+                } catch (_: Exception) {}
+
+                try {
+                    val player = mediaPlayerComponent.mediaPlayer()
+                    if (player.status().isPlaying) {
+                        player.controls().stop()
+                    }
+                    mediaPlayerComponent.release()
+                } catch (_: Exception) {}
+
+                // Terminate the JVM cleanly
+                exitProcess(0)
             }
         }
 
@@ -232,43 +264,33 @@ fun main() {
             }
         }
 
-        DisposableEffect(Unit) {
-            onDispose { mediaPlayerComponent.release() }
-        }
-
         Tray(
             icon = rememberVectorPainter(Icons.Default.LiveTv),
             tooltip = "OpenFlix Desktop",
             menu = {
-                Item("Quit", onClick = {
-                    discovery.stop()
-                    client.disconnect()
-                    mediaPlayerComponent.mediaPlayer().controls().stop()
-                    mediaPlayerComponent.release()
-                    exitApplication()
-                })
+                Item("Quit", onClick = { safeShutdown() })
             }
         )
 
         Window(
-            onCloseRequest = {
-                mediaPlayerComponent.mediaPlayer().controls().stop()
-                client.sendProgressTick(activeMediaId, activeEpisodeId, currentPositionMs, totalDurationMs, false)
-                client.disconnect()
-                discovery.stop()
-                mediaPlayerComponent.release()
-                exitApplication()
-            },
+            onCloseRequest = { safeShutdown() },
             state = windowState,
             title = "OpenFlix Player - $currentTitle"
         ) {
             Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-                AnimatedVisibility(
-                    visible = isControlsVisible,
-                    enter = expandVertically() + fadeIn(),
-                    exit = shrinkVertically() + fadeOut()
+                val topBarAlpha by animateFloatAsState(
+                    targetValue = if (isControlsVisible) 1f else 0f,
+                    animationSpec = tween(250)
+                )
+
+                Surface(
+                    color = Color(0xFF181818),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(if (isControlsVisible) Dp.Unspecified else 0.dp)
+                        .graphicsLayer { alpha = topBarAlpha }
                 ) {
-                    Surface(color = Color(0xFF181818), modifier = Modifier.fillMaxWidth()) {
+                    if (isControlsVisible) {
                         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -314,7 +336,6 @@ fun main() {
                     }
                 }
 
-
                 Box(modifier = Modifier.fillMaxWidth().weight(1f).background(Color.Black)) {
                     SwingPanel(
                         modifier = Modifier.fillMaxSize(),
@@ -350,8 +371,20 @@ fun main() {
                             })
 
                             videoSurface.addMouseMotionListener(object : MouseMotionAdapter() {
+                                private var lastScreenX = -1
+                                private var lastScreenY = -1
+
                                 override fun mouseMoved(e: MouseEvent) {
-                                    showControls()
+                                    val screenLoc = try { e.locationOnScreen } catch (_: Exception) { null }
+                                    if (screenLoc != null) {
+                                        if (screenLoc.x != lastScreenX || screenLoc.y != lastScreenY) {
+                                            lastScreenX = screenLoc.x
+                                            lastScreenY = screenLoc.y
+                                            showControls()
+                                        }
+                                    } else {
+                                        showControls()
+                                    }
                                 }
                             })
 
@@ -363,18 +396,23 @@ fun main() {
                     )
                 }
 
-
                 val isNearEnd = totalDurationMs > 30000L && currentPositionMs >= (totalDurationMs * 0.95)
                 val shouldShowBottomBar = isControlsVisible || (isNearEnd && hasNextEpisode && !dismissedCredits)
 
-                AnimatedVisibility(
-                    visible = shouldShowBottomBar,
-                    enter = expandVertically() + fadeIn(),
-                    exit = shrinkVertically() + fadeOut()
+                val bottomBarAlpha by animateFloatAsState(
+                    targetValue = if (shouldShowBottomBar) 1f else 0f,
+                    animationSpec = tween(250)
+                )
+
+                Surface(
+                    color = Color(0xFF181818),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(if (shouldShowBottomBar) Dp.Unspecified else 0.dp)
+                        .graphicsLayer { alpha = bottomBarAlpha }
                 ) {
-                    Surface(color = Color(0xFF181818), modifier = Modifier.fillMaxWidth()) {
+                    if (shouldShowBottomBar) {
                         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
-                            // End-of-Episode Banner
                             if (isNearEnd && hasNextEpisode && !dismissedCredits) {
                                 Row(
                                     modifier = Modifier

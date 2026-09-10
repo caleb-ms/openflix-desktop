@@ -101,4 +101,9 @@ class DesktopRemoteClient {
             } catch (_: Exception) {}
         }
     }
+
+    fun close() {
+        scope.cancel()
+        client.close()
+    }
 }
