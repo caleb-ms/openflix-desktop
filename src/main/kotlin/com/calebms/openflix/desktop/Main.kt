@@ -87,6 +87,9 @@ fun main() {
         var isSeeking by remember { mutableStateOf(false) }
         var scrubPosition by remember { mutableLongStateOf(0L) }
 
+        var audioTracks by remember { mutableStateOf<List<TrackOption>>(emptyList()) }
+        var subtitleTracks by remember { mutableStateOf<List<TrackOption>>(emptyList()) }
+
         val isWindows = remember { System.getProperty("os.name").lowercase().contains("win") }
         val mediaPlayerComponent = remember {
             val voutParam = if (isWindows) "--vout=direct3d11,any" else "--vout=x11,any"
@@ -158,6 +161,43 @@ fun main() {
             }
         }
 
+        fun fetchAndSendTracks() {
+            val player = mediaPlayerComponent.mediaPlayer()
+
+            // 1. Audio Tracks
+            val currentAudio = player.audio().track()
+            val audioList = player.audio().trackDescriptions()?.map { desc ->
+                TrackOption(
+                    id = desc.id(),
+                    name = desc.description(),
+                    isSelected = desc.id() == currentAudio
+                )
+            } ?: emptyList()
+
+            // 2. Subtitle / SPU Tracks
+            val currentSub = player.subpictures().track()
+            val subList = player.subpictures().trackDescriptions()?.map { desc ->
+                TrackOption(
+                    id = desc.id(),
+                    name = if (desc.id() == -1) "Off" else desc.description(),
+                    isSelected = desc.id() == currentSub
+                )
+            } ?: emptyList()
+
+            audioTracks = audioList
+            subtitleTracks = subList
+
+            client.sendCommand(
+                RemoteMessage(
+                    action = CommandAction.TRACKS_INFO,
+                    mediaId = activeMediaId,
+                    episodeId = activeEpisodeId,
+                    audioTracks = audioList,
+                    subtitleTracks = subList
+                )
+            )
+        }
+
         fun safeShutdown() {
             if (!isShuttingDown.compareAndSet(false, true)) return
 
@@ -203,6 +243,11 @@ fun main() {
                         dismissedCredits = false
                         windowState.placement = WindowPlacement.Maximized
 
+                        coroutineScope.launch {
+                            delay(1500)
+                            fetchAndSendTracks()
+                        }
+
                         val streamUrl = msg.streamUrl
                         if (!streamUrl.isNullOrBlank()) {
                             val startSec = msg.positionMs / 1000.0
@@ -245,6 +290,18 @@ fun main() {
                         currentTitle = "OpenFlix Idle"
                         currentOverview = null
                         isControlsVisible = true
+                    }
+                    CommandAction.SET_AUDIO_TRACK -> {
+                        msg.selectedTrackId?.let { trackId ->
+                            mediaPlayerComponent.mediaPlayer().audio().setTrack(trackId)
+                            fetchAndSendTracks()
+                        }
+                    }
+                    CommandAction.SET_SUBTITLE_TRACK -> {
+                        msg.selectedTrackId?.let { trackId ->
+                            mediaPlayerComponent.mediaPlayer().subpictures().setTrack(trackId)
+                            fetchAndSendTracks()
+                        }
                     }
                     else -> Unit
                 }
