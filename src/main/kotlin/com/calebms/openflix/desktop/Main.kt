@@ -1,41 +1,30 @@
 package com.calebms.openflix.desktop
 
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
+import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.SwingPanel
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.*
-import kotlinx.coroutines.Dispatchers
+import com.sun.jna.NativeLibrary
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import uk.co.caprica.vlcj.binding.support.runtime.RuntimeUtil
+import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
 import uk.co.caprica.vlcj.player.component.EmbeddedMediaPlayerComponent
 import java.awt.BorderLayout
-import java.awt.event.KeyAdapter
 import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.event.MouseMotionAdapter
-import javax.swing.JPanel
-import com.sun.jna.NativeLibrary
-import uk.co.caprica.vlcj.binding.support.runtime.RuntimeUtil
-import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
 import java.io.File
+import javax.swing.JPanel
 import kotlin.system.exitProcess
 
 fun initializeVlc() {
@@ -80,6 +69,9 @@ fun main() {
         var currentPositionMs by remember { mutableLongStateOf(0L) }
         var totalDurationMs by remember { mutableLongStateOf(0L) }
 
+        var volume by remember { mutableFloatStateOf(1.0f) }
+        var isMuted by remember { mutableStateOf(false) }
+
         var isControlsVisible by remember { mutableStateOf(true) }
         var hideControlsJob by remember { mutableStateOf<Job?>(null) }
         var dismissedCredits by remember { mutableStateOf(false) }
@@ -101,6 +93,18 @@ fun main() {
                 "--clock-jitter=0",
                 "--clock-synchro=0"
             )
+        }
+
+        fun updateVolume(newVol: Float) {
+            val clampedVol = newVol.coerceIn(0f, 1f)
+            volume = clampedVol
+            isMuted = clampedVol == 0f
+            mediaPlayerComponent.mediaPlayer().audio().setVolume((clampedVol * 100).toInt())
+        }
+
+        fun toggleMute() {
+            isMuted = !isMuted
+            mediaPlayerComponent.mediaPlayer().audio().setMute(isMuted)
         }
 
         fun scheduleHideControls() {
@@ -201,7 +205,6 @@ fun main() {
         fun safeShutdown() {
             if (!isShuttingDown.compareAndSet(false, true)) return
 
-            // Run teardown off the UI thread
             kotlin.concurrent.thread(start = true, isDaemon = false, name = "AppShutdownThread") {
                 try {
                     client.sendProgressTick(activeMediaId, activeEpisodeId, currentPositionMs, totalDurationMs, false)
@@ -218,7 +221,6 @@ fun main() {
                     mediaPlayerComponent.release()
                 } catch (_: Exception) {}
 
-                // Terminate the JVM cleanly
                 exitProcess(0)
             }
         }
@@ -287,6 +289,8 @@ fun main() {
                     CommandAction.DISCONNECT -> {
                         mediaPlayerComponent.mediaPlayer().controls().stop()
                         isPlaying = false
+                        activeMediaId = null
+                        activeEpisodeId = null
                         currentTitle = "OpenFlix Idle"
                         currentOverview = null
                         isControlsVisible = true
@@ -334,251 +338,163 @@ fun main() {
             state = windowState,
             title = "OpenFlix Player - $currentTitle"
         ) {
-            Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-                val topBarAlpha by animateFloatAsState(
-                    targetValue = if (isControlsVisible) 1f else 0f,
-                    animationSpec = tween(250)
-                )
+            val hasActiveMedia = activeMediaId != null || isPlaying
 
-                Surface(
-                    color = Color(0xFF181818),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(if (isControlsVisible) Dp.Unspecified else 0.dp)
-                        .graphicsLayer { alpha = topBarAlpha }
-                ) {
-                    if (isControlsVisible) {
-                        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(text = currentTitle, color = Color.White, fontSize = 16.sp)
-                                Surface(
-                                    color = if (isConnected) Color(0xFF1E3A24) else Color(0xFF3A1E1E),
-                                    shape = RoundedCornerShape(12.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Icon(
-                                            imageVector = if (isConnected) Icons.Default.CheckCircle else Icons.Default.WifiOff,
-                                            contentDescription = null,
-                                            tint = if (isConnected) Color(0xFF46D369) else Color(0xFFE50914),
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = if (isConnected) "Linked to Phone" else "Waiting...",
-                                            color = if (isConnected) Color(0xFF46D369) else Color(0xFFE50914),
-                                            fontSize = 11.sp
-                                        )
-                                    }
+            // Global AWT Key Event Dispatcher to capture keybinds regardless of focus (Compose, Swing, or AWT)
+            DisposableEffect(hasActiveMedia, isConnected, isPlaying, volume, isMuted, hasNextEpisode) {
+                val dispatcher = java.awt.KeyEventDispatcher { e ->
+                    if (e.id == KeyEvent.KEY_PRESSED) {
+                        when (e.keyCode) {
+                            KeyEvent.VK_SPACE -> {
+                                if (hasActiveMedia) togglePlayPause()
+                                true
+                            }
+                            KeyEvent.VK_F, KeyEvent.VK_F11 -> {
+                                toggleFullscreen()
+                                true
+                            }
+                            KeyEvent.VK_ESCAPE -> {
+                                if (windowState.placement == WindowPlacement.Fullscreen) {
+                                    windowState.placement = WindowPlacement.Floating
                                 }
+                                true
                             }
-
-                            if (!isPlaying && !currentOverview.isNullOrBlank()) {
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Text(
-                                    text = currentOverview ?: "",
-                                    color = Color.LightGray,
-                                    fontSize = 12.sp,
-                                    maxLines = 3,
-                                    lineHeight = 16.sp
-                                )
+                            KeyEvent.VK_LEFT -> {
+                                if (hasActiveMedia) seekBy(-10000L)
+                                true
                             }
+                            KeyEvent.VK_RIGHT -> {
+                                if (hasActiveMedia) seekBy(10000L)
+                                true
+                            }
+                            KeyEvent.VK_N -> {
+                                if (hasActiveMedia && hasNextEpisode) triggerNextEpisode()
+                                true
+                            }
+                            KeyEvent.VK_M -> {
+                                toggleMute()
+                                true
+                            }
+                            KeyEvent.VK_UP -> {
+                                updateVolume((volume + 0.1f).coerceAtMost(1.0f))
+                                true
+                            }
+                            KeyEvent.VK_DOWN -> {
+                                updateVolume((volume - 0.1f).coerceAtLeast(0.0f))
+                                true
+                            }
+                            else -> false
                         }
-                    }
+                    } else false
                 }
 
-                Box(modifier = Modifier.fillMaxWidth().weight(1f).background(Color.Black)) {
-                    SwingPanel(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = {
-                            mediaPlayerComponent.mediaPlayer().input().enableMouseInputHandling(false)
-                            mediaPlayerComponent.mediaPlayer().input().enableKeyInputHandling(false)
+                val focusManager = java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager()
+                focusManager.addKeyEventDispatcher(dispatcher)
 
-                            val videoSurface = mediaPlayerComponent.videoSurfaceComponent()
-                            videoSurface.isFocusable = true
+                onDispose {
+                    focusManager.removeKeyEventDispatcher(dispatcher)
+                }
+            }
 
-                            videoSurface.addKeyListener(object : KeyAdapter() {
-                                override fun keyPressed(e: KeyEvent) {
-                                    when (e.keyCode) {
-                                        KeyEvent.VK_SPACE -> togglePlayPause()
-                                        KeyEvent.VK_F, KeyEvent.VK_F11 -> toggleFullscreen()
-                                        KeyEvent.VK_ESCAPE -> {
-                                            if (windowState.placement == WindowPlacement.Fullscreen) {
-                                                windowState.placement = WindowPlacement.Floating
-                                            }
-                                        }
-                                        KeyEvent.VK_LEFT -> seekBy(-10000L)
-                                        KeyEvent.VK_RIGHT -> seekBy(10000L)
-                                        KeyEvent.VK_N -> if (hasNextEpisode) triggerNextEpisode()
+            if (!hasActiveMedia) {
+                IdleScreen(isConnected = isConnected)
+            } else {
+                Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+                    PlayerTopBar(
+                        title = currentTitle,
+                        overview = currentOverview,
+                        isConnected = isConnected,
+                        isPlaying = isPlaying,
+                        isControlsVisible = isControlsVisible
+                    )
+
+                    Box(modifier = Modifier.fillMaxWidth().weight(1f).background(Color.Black)) {
+                        SwingPanel(
+                            modifier = Modifier.fillMaxSize(),
+                            factory = {
+                                mediaPlayerComponent.mediaPlayer().input().enableMouseInputHandling(false)
+                                mediaPlayerComponent.mediaPlayer().input().enableKeyInputHandling(false)
+
+                                    val videoSurface = mediaPlayerComponent.videoSurfaceComponent()
+
+                                videoSurface.addMouseListener(object : MouseAdapter() {
+                                    override fun mouseClicked(e: MouseEvent) {
+                                        togglePlayPause()
                                     }
-                                }
-                            })
+                                })
 
-                            videoSurface.addMouseListener(object : MouseAdapter() {
-                                override fun mouseClicked(e: MouseEvent) {
-                                    videoSurface.requestFocusInWindow()
-                                    togglePlayPause()
-                                }
-                            })
+                                videoSurface.addMouseMotionListener(object : MouseMotionAdapter() {
+                                    private var lastScreenX = -1
+                                    private var lastScreenY = -1
 
-                            videoSurface.addMouseMotionListener(object : MouseMotionAdapter() {
-                                private var lastScreenX = -1
-                                private var lastScreenY = -1
-
-                                override fun mouseMoved(e: MouseEvent) {
-                                    val screenLoc = try { e.locationOnScreen } catch (_: Exception) { null }
-                                    if (screenLoc != null) {
-                                        if (screenLoc.x != lastScreenX || screenLoc.y != lastScreenY) {
-                                            lastScreenX = screenLoc.x
-                                            lastScreenY = screenLoc.y
+                                    override fun mouseMoved(e: MouseEvent) {
+                                        val screenLoc = try { e.locationOnScreen } catch (_: Exception) { null }
+                                        if (screenLoc != null) {
+                                            if (screenLoc.x != lastScreenX || screenLoc.y != lastScreenY) {
+                                                lastScreenX = screenLoc.x
+                                                lastScreenY = screenLoc.y
+                                                showControls()
+                                            }
+                                        } else {
                                             showControls()
                                         }
-                                    } else {
-                                        showControls()
                                     }
-                                }
-                            })
+                                })
 
-                            JPanel(BorderLayout()).apply {
-                                background = java.awt.Color.BLACK
-                                add(mediaPlayerComponent, BorderLayout.CENTER)
-                            }
-                        }
-                    )
-                }
-
-                val isNearEnd = totalDurationMs > 30000L && currentPositionMs >= (totalDurationMs * 0.95)
-                val shouldShowBottomBar = isControlsVisible || (isNearEnd && hasNextEpisode && !dismissedCredits)
-
-                val bottomBarAlpha by animateFloatAsState(
-                    targetValue = if (shouldShowBottomBar) 1f else 0f,
-                    animationSpec = tween(250)
-                )
-
-                Surface(
-                    color = Color(0xFF181818),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(if (shouldShowBottomBar) Dp.Unspecified else 0.dp)
-                        .graphicsLayer { alpha = bottomBarAlpha }
-                ) {
-                    if (shouldShowBottomBar) {
-                        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
-                            if (isNearEnd && hasNextEpisode && !dismissedCredits) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(bottom = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.End
-                                ) {
-                                    OutlinedButton(
-                                        onClick = { dismissedCredits = true },
-                                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
-                                    ) {
-                                        Text("Watch Credits", fontSize = 12.sp)
-                                    }
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Button(
-                                        onClick = { triggerNextEpisode() },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE50914))
-                                    ) {
-                                        Icon(Icons.Default.SkipNext, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("Next Episode Now", fontSize = 12.sp)
-                                    }
+                                JPanel(BorderLayout()).apply {
+                                    background = java.awt.Color.BLACK
+                                    add(mediaPlayerComponent, BorderLayout.CENTER)
                                 }
                             }
-
-                            val displayPosition = if (isSeeking) scrubPosition else currentPositionMs
-
-                            Slider(
-                                value = displayPosition.toFloat(),
-                                onValueChange = {
-                                    isSeeking = true
-                                    scrubPosition = it.toLong()
-                                },
-                                onValueChangeFinished = {
-                                    isSeeking = false
-                                    mediaPlayerComponent.mediaPlayer().controls().setTime(scrubPosition)
-                                    currentPositionMs = scrubPosition
-                                    client.sendProgressTick(activeMediaId, activeEpisodeId, scrubPosition, totalDurationMs, isPlaying)
-                                    scheduleHideControls()
-                                },
-                                valueRange = 0f..(if (totalDurationMs > 0) totalDurationMs.toFloat() else 1f),
-                                colors = SliderDefaults.colors(
-                                    thumbColor = Color(0xFFE50914),
-                                    activeTrackColor = Color(0xFFE50914),
-                                    inactiveTrackColor = Color(0xFF333333)
-                                )
-                            )
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    IconButton(onClick = { togglePlayPause() }) {
-                                        Icon(
-                                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                            contentDescription = if (isPlaying) "Pause" else "Play",
-                                            tint = Color.White
-                                        )
-                                    }
-
-                                    IconButton(onClick = { seekBy(-10000L) }) {
-                                        Icon(Icons.Default.Replay10, contentDescription = "Rewind 10s", tint = Color.White)
-                                    }
-
-                                    IconButton(onClick = { seekBy(10000L) }) {
-                                        Icon(Icons.Default.Forward10, contentDescription = "Forward 10s", tint = Color.White)
-                                    }
-
-                                    if (hasNextEpisode) {
-                                        IconButton(onClick = { triggerNextEpisode() }) {
-                                            Icon(Icons.Default.SkipNext, contentDescription = "Next Episode", tint = Color.White)
-                                        }
-                                    }
-
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Text(
-                                        text = "${formatDuration(displayPosition)} / ${formatDuration(totalDurationMs)}",
-                                        color = Color.LightGray,
-                                        fontSize = 13.sp
-                                    )
-                                }
-
-                                IconButton(onClick = { toggleFullscreen() }) {
-                                    Icon(
-                                        imageVector = if (windowState.placement == WindowPlacement.Fullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                                        contentDescription = "Toggle Fullscreen",
-                                        tint = Color.White
-                                    )
-                                }
-                            }
-                        }
+                        )
                     }
+
+                    val isNearEnd = totalDurationMs > 30000L && currentPositionMs >= (totalDurationMs * 0.95)
+
+                    PlayerBottomBar(
+                        currentPositionMs = currentPositionMs,
+                        totalDurationMs = totalDurationMs,
+                        isPlaying = isPlaying,
+                        isMuted = isMuted,
+                        volume = volume,
+                        isSeeking = isSeeking,
+                        scrubPosition = scrubPosition,
+                        hasNextEpisode = hasNextEpisode,
+                        isNearEnd = isNearEnd,
+                        dismissedCredits = dismissedCredits,
+                        isControlsVisible = isControlsVisible,
+                        audioTracks = audioTracks,
+                        subtitleTracks = subtitleTracks,
+                        isFullscreen = windowState.placement == WindowPlacement.Fullscreen,
+                        onPlayPauseToggle = { togglePlayPause() },
+                        onSeekBy = { seekBy(it) },
+                        onScrubChange = {
+                            isSeeking = true
+                            scrubPosition = it
+                        },
+                        onScrubFinished = {
+                            isSeeking = false
+                            mediaPlayerComponent.mediaPlayer().controls().setTime(it)
+                            currentPositionMs = it
+                            client.sendProgressTick(activeMediaId, activeEpisodeId, it, totalDurationMs, isPlaying)
+                            scheduleHideControls()
+                        },
+                        onVolumeChange = { updateVolume(it) },
+                        onMuteToggle = { toggleMute() },
+                        onAudioTrackSelect = { track ->
+                            mediaPlayerComponent.mediaPlayer().audio().setTrack(track.id)
+                            fetchAndSendTracks()
+                        },
+                        onSubtitleTrackSelect = { track ->
+                            mediaPlayerComponent.mediaPlayer().subpictures().setTrack(track.id)
+                            fetchAndSendTracks()
+                        },
+                        onNextEpisode = { triggerNextEpisode() },
+                        onDismissCredits = { dismissedCredits = true },
+                        onFullscreenToggle = { toggleFullscreen() }
+                    )
                 }
             }
         }
-    }
-}
-
-private fun formatDuration(ms: Long): String {
-    val totalSeconds = ms / 1000
-    val seconds = totalSeconds % 60
-    val minutes = (totalSeconds / 60) % 60
-    val hours = totalSeconds / 3600
-    return if (hours > 0) {
-        String.format("%d:%02d:%02d", hours, minutes, seconds)
-    } else {
-        String.format("%02d:%02d", minutes, seconds)
     }
 }
